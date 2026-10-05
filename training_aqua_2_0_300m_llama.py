@@ -1,5 +1,5 @@
 # ============================================================
-# AQUA 2.0 ULTRA v4 - FUSION (solo LLaMA, adios GPT-2)
+# AQUA 3.0.0 - FUSION (solo LLaMA, adios GPT-2)
 # ~300M params | RoPE + SwiGLU + RMSNorm + GQA | chat-first | 12h Kaggle
 # ============================================================
 import os
@@ -39,6 +39,9 @@ CKPT_MIN, SUBIR_MIN = 20, 60
 RESUMIR_DESDE_HF = False   # True: si no hay ckpt local, baja ckpt.pt del repo
 ROL_USER, ROL_BOT = "USUARIO", "ASISTENTE"
 ARCH = "llama300m-v4"
+REPO_ID = os.environ.get("AQUA_REPO", "aquas-modela/Aqua-3.0.0")   # repo NUEVO en HF
+GEN = dict(temperature=0.78, top_p=0.92, top_k=50, repetition_penalty=1.08,
+           no_repeat_ngram_size=3)                                   # sampling para chat
 
 # Fuentes de texto web en espanol (las que fallen se ignoran solas)
 FUENTES = [
@@ -52,6 +55,7 @@ FUENTES = [
 SALIDA = "/kaggle/working"
 DATOS = os.path.join(SALIDA, "dataset_1m.json")
 HF_DATA = os.path.join(SALIDA, "aqua_conversations.jsonl")
+CONFIG_PY = os.path.join(SALIDA, "config.py")
 TOK_DIR = os.path.join(SALIDA, "tokenizer")
 CKPT = os.path.join(SALIDA, "ckpt.pt")
 dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -70,18 +74,34 @@ print(f"dev={dev} | amp={str(AMP_DTYPE).split('.')[-1]} | sesion={(time.time() -
       f"| limite={LIMITE_H}h | block={BLOCK}")
 
 # ======================= HUGGING FACE =======================
-REPO_HF, api = None, None
+REPO_HF, api, USER = None, None, None
 try:
     from huggingface_hub import HfApi, login
     from kaggle_secrets import UserSecretsClient
     login(token=UserSecretsClient().get_secret("HF_TOKEN"))
     api = HfApi()
     USER = api.whoami()["name"]
-    REPO_HF = f"{USER}/Aqua-2.0-300M"
-    api.create_repo(REPO_HF, repo_type="model", exist_ok=True)
-    print(f"HF OK: {REPO_HF}")
+    REPO_HF = REPO_ID
+    print(f"HF OK: {USER} -> {REPO_HF}")
 except Exception as e:
     print(f"HF aviso: {e}")
+if api:
+    try:
+        api.create_repo(REPO_HF, repo_type="model", exist_ok=True)
+    except Exception as e:
+        print(f"HF aviso create_repo ({type(e).__name__}): sigo, el repo ya deberia existir")
+
+def subir_pequeno(path, dest):
+    """Sube un archivo chico (sincrono). Devuelve True/False."""
+    if not REPO_HF or not os.path.exists(path):
+        return False
+    try:
+        api.upload_file(path_or_fileobj=path, path_in_repo=dest, repo_id=REPO_HF, repo_type="model")
+        print(f"[HF] subido: {dest}")
+        return True
+    except Exception as e:
+        print(f"[HF] error {dest}: {e}")
+        return False
 
 lock_ckpt = threading.Lock()
 
@@ -326,12 +346,15 @@ if not os.path.exists(DATOS):
     cand = glob.glob("/kaggle/input/**/dataset_1m.json", recursive=True)
     if cand:
         shutil.copy2(cand[0], DATOS)
-    elif REPO_HF:
-        try:
-            from huggingface_hub import hf_hub_download
-            hf_hub_download(REPO_HF, "dataset_1m.json", local_dir=SALIDA)
-        except Exception as e:
-            print(f"No pude bajar dataset de HF: {e}")
+    elif api:
+        from huggingface_hub import hf_hub_download
+        for rid in (REPO_HF, f"{USER}/Aqua-2.0-300M"):     # el viejo tiene tu dataset_1m.json
+            try:
+                hf_hub_download(rid, "dataset_1m.json", local_dir=SALIDA)
+                print(f"dataset_1m.json bajado de {rid}")
+                break
+            except Exception as e:
+                print(f"dataset no esta en {rid}: {type(e).__name__}")
 
 local = load_local()
 print(f"Conversaciones locales validas: {len(local):,}")
@@ -578,6 +601,102 @@ def guardar_ckpt(bloquear=False):
     finally:
         lock_ckpt.release()
 
+# ======================= config.py (se sube al repo) =======================
+import pprint
+
+CONFIG_TXT = '''# Aqua - configuracion (autogenerada por el script de entrenamiento)
+# Uso: from config import CONFIG, construir_ids, responder
+
+CONFIG = __CONFIG__
+
+ROL_USER = CONFIG["prompt"]["rol_usuario"]
+ROL_BOT = CONFIG["prompt"]["rol_bot"]
+
+
+def construir_ids(tok, turnos):
+    """turnos = [u1, b1, u2, ...] terminando en turno del usuario -> ids EXACTOS del entrenamiento."""
+    ids = []
+    for j, t in enumerate(turnos):
+        if j % 2 == 0:
+            txt = ("" if j == 0 else "\\n") + f"{ROL_USER}: {t}\\n{ROL_BOT}:"
+            ids += tok(txt, add_special_tokens=False)["input_ids"]
+        else:
+            ids += tok(" " + t, add_special_tokens=False)["input_ids"] + [tok.eos_token_id]
+    return ids
+
+
+def responder(turnos, repo=CONFIG["repo"], max_new_tokens=200):
+    """Carga el modelo desde HF y responde. turnos puede ser un str o [u1, b1, u2, ...]."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(repo)
+    model = AutoModelForCausalLM.from_pretrained(repo).eval()
+    if isinstance(turnos, str):
+        turnos = [turnos]
+    x = torch.tensor([construir_ids(tok, turnos)])
+    gen = {k: v for k, v in CONFIG["generacion"].items() if k != "max_new_tokens"}
+    with torch.no_grad():
+        y = model.generate(input_ids=x, attention_mask=torch.ones_like(x), do_sample=True,
+                           max_new_tokens=max_new_tokens, eos_token_id=tok.eos_token_id,
+                           pad_token_id=tok.pad_token_id, **gen)
+    txt = tok.decode(y[0][x.shape[1]:], skip_special_tokens=True).strip()
+    return txt.split("\\n" + ROL_USER + ":")[0].strip()
+
+
+if __name__ == "__main__":
+    print(responder("hola"))
+'''
+
+def _limpio(x):
+    if isinstance(x, float) and not math.isfinite(x):
+        return None
+    if isinstance(x, dict):
+        return {k: _limpio(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_limpio(v) for v in x]
+    return x
+
+def escribir_config(path):
+    d = {
+        "nombre": REPO_ID.split("/")[-1],
+        "repo": REPO_ID,
+        "arquitectura": {
+            "tipo": "LlamaForCausalLM", "parametros": n_par, "vocab_size": cfg.vocab_size,
+            "hidden_size": cfg.hidden_size, "intermediate_size": cfg.intermediate_size,
+            "num_hidden_layers": cfg.num_hidden_layers,
+            "num_attention_heads": cfg.num_attention_heads,
+            "num_key_value_heads": cfg.num_key_value_heads, "contexto": BLOCK,
+            "tie_word_embeddings": True, "rms_norm_eps": cfg.rms_norm_eps,
+        },
+        "tokens": {"pad": PAD, "eos": EOS, "bos": BOS if HAY_BOS else None},
+        "prompt": {"rol_usuario": ROL_USER, "rol_bot": ROL_BOT},
+        "generacion": dict(max_new_tokens=200, **GEN),
+        "entrenamiento": {
+            "amp": str(AMP_DTYPE).split(".")[-1], "micro_batch": MB, "acumulacion": ACUM,
+            "tokens_por_paso": MB * ACUM * BLOCK, "lr_pre_max": LR_PRE_MAX, "lr_pre_min": LR_PRE_MIN,
+            "warmup": WARMUP, "lr_sft_max": LR_SFT_MAX, "lr_sft_min": LR_SFT_MIN,
+            "chat_mix": [CHAT_MIX0, CHAT_MIX1], "sft_epocas_max": SFT_EPOCAS_MAX,
+            "limite_horas": LIMITE_H, "horas_sft": HORAS_SFT, "seed": SEED,
+        },
+        "datos": {
+            "train": len(tr_p), "val": len(val_p), "locales": len(local), "sharegpt": len(share),
+            "sharegpt_rep": SHAREGPT_REP, "sinteticos": SINTETICOS,
+            "fuentes_web": [n for n, _, _ in FUENTES_OK],
+        },
+        "resultado": {
+            "pasos": estado["paso"], "fase": estado["fase"], "epocas_sft": estado["epoca_sft"],
+            "val_loss_mejor": estado["mejor"], "horas": round((time.time() - T0) / 3600, 2),
+        },
+    }
+    texto = CONFIG_TXT.replace("__CONFIG__", pprint.pformat(_limpio(d), sort_dicts=False, width=100))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(texto)
+
+escribir_config(CONFIG_PY)
+if REPO_HF and not subir_pequeno(CONFIG_PY, "config.py"):
+    print(f"OJO: no pude escribir en {REPO_HF}. Revisa que tu HF_TOKEN tenga permiso de "
+          f"escritura en la organizacion (el entrenamiento sigue igual).")
+
 # ======================= UTILIDADES =======================
 def micro(ids, lab, div):
     ids = ids.to(dev, non_blocking=True)
@@ -607,10 +726,8 @@ def generar(turnos, max_new=120):
     x = torch.tensor([ids], device=dev)
     with torch.autocast(device_type=dev, dtype=AMP_DTYPE, enabled=usa_amp):
         out = model.generate(input_ids=x, attention_mask=torch.ones_like(x),
-                             max_new_tokens=max_new, do_sample=True, temperature=0.78,
-                             top_p=0.92, top_k=50, repetition_penalty=1.08,
-                             no_repeat_ngram_size=3, eos_token_id=EOS, pad_token_id=PAD,
-                             use_cache=True)
+                             max_new_tokens=max_new, do_sample=True, **GEN,
+                             eos_token_id=EOS, pad_token_id=PAD, use_cache=True)
     model.train()
     txt = tok.decode(out[0][x.shape[1]:].tolist()).strip()
     return txt.split(f"\n{ROL_USER}:")[0].strip()
@@ -907,8 +1024,7 @@ if usa_amp:
     model.to(AMP_DTYPE)
 model.config.use_cache = True
 for k_, v_ in dict(eos_token_id=EOS, pad_token_id=PAD, bos_token_id=BOS, do_sample=True,
-                   temperature=0.78, top_p=0.92, top_k=50, repetition_penalty=1.08,
-                   no_repeat_ngram_size=3, max_new_tokens=200).items():
+                   max_new_tokens=200, **GEN).items():
     setattr(model.generation_config, k_, v_)
 model.save_pretrained(FINAL, safe_serialization=True)
 try:
@@ -921,12 +1037,14 @@ except Exception as e:
     print(f"tokenizer HF aviso: {e}")
 for f in ("vocab.json", "merges.txt"):
     shutil.copy2(os.path.join(TOK_DIR, f), os.path.join(FINAL, f))
+escribir_config(CONFIG_PY)                       # ahora con los resultados finales
+shutil.copy2(CONFIG_PY, os.path.join(FINAL, "config.py"))
 
 README = """---
 language: es
 license: apache-2.0
 ---
-# Aqua 2.0 (~300M)
+# Aqua 3.0.0 (~300M)
 Modelo conversacional en espanol (arquitectura LLaMA: RoPE + SwiGLU + RMSNorm + GQA).
 Pretraining mixto (web + chat) y SFT conversacional con dialogos multi-turno.
 
@@ -935,7 +1053,8 @@ Formato de prompt:
     __U__: <pregunta>
     __B__:
 
-Multi-turno: cada respuesta termina en el token <eos>, luego "\\n__U__: ...\\n__B__:".
+Multi-turno y parametros de generacion: ver `config.py` (`responder([...])` arma los ids exactos del
+entrenamiento; cada respuesta del asistente termina en el token <eos>).
 
 ```python
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -947,7 +1066,7 @@ print(tok.decode(y[0][x["input_ids"].shape[1]:], skip_special_tokens=True))
 ```
 """
 with open(os.path.join(FINAL, "README.md"), "w", encoding="utf-8") as fh:
-    fh.write(README.replace("__REPO__", REPO_HF or "TU_USUARIO/Aqua-2.0-300M")
+    fh.write(README.replace("__REPO__", REPO_HF or REPO_ID)
                    .replace("__U__", ROL_USER).replace("__B__", ROL_BOT))
 
 print(f"\nTERMINADO: {(time.time() - T0) / 3600:.2f}h | pasos={estado['paso']}")

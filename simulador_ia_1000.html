@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subtom AI - Simulador 1000 Preguntas</title>
+    <style>
+        :root {
+            --bg-color: #13131a;
+            --panel-bg: #1e1e28;
+            --accent: #6c5ce7;
+            --accent-hover: #5b4bc4;
+            --text-main: #f1f2f6;
+            --text-muted: #a4b0be;
+            --border: #2f2f3d;
+            --user-bubble: #2d3436;
+            --ai-bubble: #1e1e28;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar */
+        .sidebar { width: 300px; background-color: var(--panel-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px; }
+        .sidebar h2 { font-size: 1.2rem; margin-bottom: 15px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+        .search-box { width: 100%; padding: 10px 14px; background: var(--bg-color); border: 1px solid var(--border); border-radius: 8px; color: var(--text-main); font-size: 0.9rem; outline: none; margin-bottom: 15px; transition: border 0.2s; }
+        .search-box:focus { border-color: var(--accent); }
+        .question-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 5px; }
+        .question-item { background: var(--bg-color); padding: 10px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; border: 1px solid transparent; transition: all 0.2s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .question-item:hover { border-color: var(--accent); background: rgba(108, 92, 231, 0.05); }
+
+        /* Main Chat Area */
+        .chat-container { flex: 1; display: flex; flex-direction: column; height: 100%; }
+        .chat-header { padding: 20px; border-bottom: 1px solid var(--border); background: var(--panel-bg); display: flex; justify-content: space-between; align-items: center; }
+        .chat-header h1 { font-size: 1.3rem; }
+        .stats { font-size: 0.85rem; color: var(--text-muted); background: var(--bg-color); padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); }
+
+        .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+        .message { max-width: 75%; padding: 14px 18px; border-radius: 12px; line-height: 1.5; font-size: 0.95rem; animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .message.user { background: var(--user-bubble); align-self: flex-end; border-bottom-right-radius: 2px; }
+        .message.ai { background: var(--ai-bubble); align-self: flex-start; border-left: 4px solid var(--accent); border-bottom-left-radius: 2px; }
+
+        /* Input Area */
+        .chat-input-area { padding: 20px; background: var(--panel-bg); border-top: 1px solid var(--border); display: flex; gap: 12px; }
+        .chat-input { flex: 1; padding: 12px 16px; background: var(--bg-color); border: 1px solid var(--border); border-radius: 8px; color: var(--text-main); font-size: 0.95rem; outline: none; transition: border 0.2s; }
+        .chat-input:focus { border-color: var(--accent); }
+        .send-btn { background: var(--accent); color: white; border: none; padding: 0 20px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+        .send-btn:hover { background: var(--accent-hover); }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar">
+        <h2>⚡ 1,000 Preguntas IA</h2>
+        <input type="text" class="search-box" id="searchBox" placeholder="Filtrar preguntas..." oninput="filterQuestions()">
+        <div class="question-list" id="questionList"></div>
+    </div>
+
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1 id="headerTitle">Simulador IA - Subtom Engine</h1>
+            <div class="stats" id="dbStats">Base de datos: 1,000 preguntas cargadas</div>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+            <div class="message ai">
+                ¡Hola! Soy tu simulador de IA con una base interna de 1,000 preguntas y respuestas frecuentes preconfiguradas. Selecciona una pregunta de la barra lateral o escribe cualquier término para buscar coincidencias instantáneas.
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <input type="text" class="chat-input" id="userInput" placeholder="Escribe tu pregunta..." onkeydown="if(event.key === 'Enter') handleUserQuery()">
+            <button class="send-btn" onclick="handleUserQuery()">Enviar</button>
+        </div>
+    </div>
+
+    <script>
+        // Generador dinámico de 1000 preguntas y respuestas simuladas
+        const database = [];
+        const categories = ['Programación', 'Ciencia', 'Historia', 'Geografía', 'Tecnología', 'Curiosidades', 'Matemáticas', 'Arte', 'Filosofía', 'Cultura General'];
+        
+        for (let i = 1; i <= 1000; i++) {
+            const cat = categories[i % categories.length];
+            database.push({
+                id: i,
+                question: `[${cat} #${i}] ¿Cuál es el principio fundamental o curiosidad número ${i} sobre este tema?`,
+                answer: `Esta es la respuesta simulada número ${i} generada por el motor de Subtom AI. Trata sobre conceptos avanzados de ${cat.toLowerCase()}, optimizando el análisis de datos, la lógica algorítmica y el conocimiento general correspondiente a este índice.`
+            });
+        }
+
+        const questionListEl = document.getElementById('questionList');
+        const chatMessagesEl = document.getElementById('chatMessages');
+        const searchBoxEl = document.getElementById('searchBox');
+        const userInputEl = document.getElementById('userInput');
+
+        function renderList(items) {
+            questionListEl.innerHTML = '';
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'question-item';
+                div.textContent = item.question;
+                div.title = item.question;
+                div.onclick = () => selectQuestion(item);
+                questionListEl.appendChild(div);
+            });
+        }
+
+        function filterQuestions() {
+            const query = searchBoxEl.value.toLowerCase();
+            const filtered = database.filter(q => q.question.toLowerCase().includes(query));
+            renderList(filtered);
+        }
+
+        function selectQuestion(item) {
+            appendMessage(item.question, 'user');
+            setTimeout(() => {
+                appendMessage(item.answer, 'ai');
+            }, 300);
+        }
+
+        function appendMessage(text, sender) {
+            const msg = document.createElement('div');
+            msg.className = `message ${sender}`;
+            msg.textContent = text;
+            chatMessagesEl.appendChild(msg);
+            chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+        }
+
+        function handleUserQuery() {
+            const val = userInputEl.value.trim();
+            if (!val) return;
+            
+            appendMessage(val, 'user');
+            userInputEl.value = '';
+
+            // Buscar coincidencia exacta o parcial en la base de datos de 1000 preguntas
+            const found = database.find(q => q.question.toLowerCase().includes(val.toLowerCase()) || q.answer.toLowerCase().includes(val.toLowerCase()));
+
+            setTimeout(() => {
+                if (found) {
+                    appendMessage(found.answer, 'ai');
+                } else {
+                    appendMessage(`He buscado en las 1,000 entradas de mi base de datos simulada y no he encontrado una coincidencia exacta para "${val}". Prueba a buscar palabras clave como "Programación", "Ciencia" o selecciona una de la barra lateral.`, 'ai');
+                }
+            }, 400);
+        }
+
+        // Inicializar listado completo
+        renderList(database);
+    </script>
+</body>
+</html>
